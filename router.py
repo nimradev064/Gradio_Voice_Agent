@@ -1,3 +1,4 @@
+
 import os
 import time
 import threading
@@ -7,13 +8,11 @@ import contextlib
 from dotenv import load_dotenv
 from openai import OpenAI
 import requests
-import pygame
 
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-# === CONFIG (unchanged from your flow) ===
 VOICE_NAME = "shimmer"
 VOICE_SPEED = 0.85
 TTS_INSTRUCTIONS = (
@@ -98,8 +97,7 @@ def transcribe_with_fireworks(wav_path: str) -> str:
     return resp.json().get("text", "")
 
 def get_llm_response(transcript: str) -> str:
-    system_prompt = """ ... """  # <-- Paste your big system prompt here (identical)
-    # [For brevity, omitted here: copy from your working code above!]
+    system_prompt = """ ... """  # <-- Paste your big system prompt here
     resp = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
@@ -120,44 +118,6 @@ def generate_tts(text: str, out_path: Path):
     ) as response:
         response.stream_to_file(str(out_path))
 
-def play_mp3_interruptible(mp3_path, stop_flag):
-    pygame.mixer.init()
-    pygame.mixer.music.load(mp3_path)
-    pygame.mixer.music.play()
-    while pygame.mixer.music.get_busy():
-        if stop_flag.is_set():
-            pygame.mixer.music.stop()
-            break
-        time.sleep(0.1)
-
-def play_processing_fillers_until_done(phrases, result, stop_flag):
-    pygame.mixer.init()
-    used_phrases = set()
-    phrase_idx = 0
-    dummy_counter = 0
-    total_initial_phrases = len(phrases)
-
-    while not result.get('done'):
-        if phrase_idx < total_initial_phrases:
-            phrase = phrases[phrase_idx]
-        else:
-            while True:
-                new_phrase = create_new_dummy_phrase(dummy_counter)
-                dummy_counter += 1
-                if new_phrase not in used_phrases:
-                    phrase = new_phrase
-                    break
-        used_phrases.add(phrase)
-        tts_path = generate_or_get_processing_tts(phrase)
-        pygame.mixer.music.load(str(tts_path))
-        pygame.mixer.music.play()
-        while pygame.mixer.music.get_busy():
-            if stop_flag.is_set() or result.get('done'):
-                pygame.mixer.music.stop()
-                return
-            time.sleep(0.2)
-        phrase_idx += 1
-
 # ========== FASTAPI APP ==========
 app = FastAPI(title="Latifoglu Audio Assistant")
 
@@ -174,32 +134,15 @@ async def process_audio(audio: UploadFile = File(...)):
         f.write(await audio.read())
 
     tts_out_path = SCRIPT_DIR / f"assistant_response_{int(time.time())}.mp3"
-    result = {'done': False}
-    stop_flag = threading.Event()
 
-    # 1. Start playing dummy fillers on server speaker (non-blocking)
-    filler_thread = threading.Thread(
-        target=play_processing_fillers_until_done,
-        args=(PROCESSING_PHRASES, result, stop_flag)
-    )
-    filler_thread.start()
+    # 1. Pipeline (no server-side audio play)
+    wav = convert_to_pcm(str(temp_file), output_wav="uploaded_input.wav")
+    duration = get_wav_duration(wav)
+    transcript = transcribe_with_fireworks(wav)
+    reply = get_llm_response(transcript)
+    generate_tts(reply, tts_out_path)
 
-    try:
-        # 2. Pipeline
-        wav = convert_to_pcm(str(temp_file), output_wav="uploaded_input.wav")
-        duration = get_wav_duration(wav)
-        transcript = transcribe_with_fireworks(wav)
-        reply = get_llm_response(transcript)
-        generate_tts(reply, tts_out_path)
-    finally:
-        result['done'] = True
-        stop_flag.set()
-        filler_thread.join()
-
-    # 3. Play final reply aloud (blocking, not streamed to client)
-    play_mp3_interruptible(str(tts_out_path), threading.Event())
-
-    # 4. Return as API response: mp3 (reply), transcript, duration, reply text
+    # 2. Return as API response: mp3 (reply), transcript, duration, reply text
     response = {
         "audio_reply_path": str(tts_out_path.name),  # for download link
         "duration_seconds": duration,
@@ -215,7 +158,6 @@ def download_audio(audio_file: str):
         return JSONResponse({"error": "File not found"}, status_code=404)
     return FileResponse(str(file_path), media_type="audio/mpeg", filename=audio_file)
 
-# ========== MAIN RUN ==========
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
