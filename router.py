@@ -167,7 +167,7 @@ app.add_middleware(
     allow_methods=["*"], allow_headers=["*"]
 )
 
-@app.post("/process-audio/")
+@app.post("/chat-audio")
 async def process_audio(audio: UploadFile = File(...)):
     temp_file = SCRIPT_DIR / f"temp_{int(time.time())}_{audio.filename}"
     with open(temp_file, "wb") as f:
